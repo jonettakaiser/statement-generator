@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #f3f1ec;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #statement-print-root,
+  #statement-print-root * {
+    visibility: visible;
+  }
+  #statement-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+}
