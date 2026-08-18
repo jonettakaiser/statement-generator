@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { supabase } from "@/lib/supabase-client"
+import { isSupabaseConfigured, supabase } from "@/lib/supabase-client"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -20,13 +20,25 @@ export default function LoginPage() {
     e.preventDefault()
     setLoading(true)
     setError(null)
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
-    setLoading(false)
-    if (signInError) {
-      setError(signInError.message)
+    if (!isSupabaseConfigured) {
+      setLoading(false)
+      setError(
+        "Supabase is not configured in this build. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY, then restart npm run dev — or if this is a production build, add the env vars and rebuild."
+      )
       return
     }
-    router.push("/statements")
+    try {
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
+      if (signInError) {
+        setError(signInError.message)
+        return
+      }
+      router.push("/statements")
+    } catch {
+      setError("Could not reach Supabase. Check NEXT_PUBLIC_SUPABASE_URL and that the app was started after .env.local was saved.")
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
