@@ -5,6 +5,11 @@ export function splitProfileLabel(profile: SplitProfile): string {
   return `${clientPct}/${100 - clientPct} client/distributor`
 }
 
+export function splitProfileShortLabel(profile: SplitProfile): string {
+  const clientPct = Math.round(SPLIT_PROFILE_CLIENT_SHARE[profile] * 100)
+  return `${clientPct}/${100 - clientPct}`
+}
+
 export function splitProfileClientShare(profile: SplitProfile): number {
   return SPLIT_PROFILE_CLIENT_SHARE[profile]
 }

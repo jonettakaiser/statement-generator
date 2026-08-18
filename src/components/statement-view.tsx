@@ -46,12 +46,12 @@ export function StatementView({
   lines: StatementLine[]
 }) {
   return (
-    <div className="space-y-8 font-sans text-ink">
-      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-ink/10 pb-6">
+    <div className="space-y-8 font-sans text-foreground">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b pb-6">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-ink/40">Revenue statement</p>
-          <h1 className="mt-1 font-sans text-2xl font-semibold">{statement.productionCompanyName ?? statement.label}</h1>
-          <p className="mt-1 text-sm text-ink/60">
+          <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Revenue statement</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">{statement.productionCompanyName ?? statement.label}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
             {statement.payment_month
               ? formatPaymentMonthLabel(statement.payment_month)
               : `${date(statement.period_start)} – ${date(statement.period_end)}`}

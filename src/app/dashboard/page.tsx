@@ -49,44 +49,44 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="flex min-h-[40vh] items-center justify-center text-ink/40">
-        <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+      <div className="flex min-h-[40vh] items-center justify-center text-muted-foreground">
+        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
         Loading…
       </div>
     )
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 px-4 py-10">
-      <div>
-        <h1 className="font-sans text-2xl font-semibold text-ink">My Statements</h1>
-        <p className="mt-1 text-sm text-ink/60">Published revenue statements for your titles.</p>
+    <div className="mx-auto max-w-3xl space-y-8 px-4 py-10">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold tracking-tight">My Statements</h1>
+        <p className="text-sm text-muted-foreground">Published revenue statements for your titles.</p>
       </div>
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">Statements</CardTitle>
+          <CardTitle>Statements</CardTitle>
           <CardDescription>Sorted by most recent.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-2">
           {statements.length === 0 ? (
-            <p className="text-sm text-ink/50">No statements have been published yet.</p>
+            <p className="text-sm text-muted-foreground">No statements have been published yet.</p>
           ) : (
             statements.map((s) => (
               <div
                 key={s.statement_id}
-                className="flex items-center justify-between rounded-lg border border-ink/10 p-4"
+                className="flex items-center justify-between rounded-md border bg-background/50 px-4 py-3"
               >
                 <div className="flex items-center gap-3">
-                  <FileText className="h-5 w-5 text-accent" />
+                  <FileText className="h-4 w-4 text-primary" />
                   <div>
-                    <p className="font-medium text-ink">{s.label}</p>
-                    <p className="text-xs text-ink/50">
+                    <p className="text-sm font-medium">{s.label}</p>
+                    <p className="text-xs text-muted-foreground">
                       {s.payment_month ? formatPaymentMonthLabel(s.payment_month) : s.period_start}
                     </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="text-sm font-medium text-ink">{money(s.net_to_client_total)}</span>
+                  <span className="text-sm font-medium tabular-nums">{money(s.net_to_client_total)}</span>
                   <Badge variant={s.status === "final" ? "default" : "secondary"} className="capitalize">
                     {s.status}
                   </Badge>

@@ -2,8 +2,37 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #f3f1ec;
+@layer base {
+  :root {
+    --background: 43 22% 94%;
+    --foreground: 36 10% 10%;
+    --card: 45 29% 97%;
+    --card-foreground: 36 10% 10%;
+    --popover: 45 29% 97%;
+    --popover-foreground: 36 10% 10%;
+    --primary: 163 33% 27%;
+    --primary-foreground: 45 29% 97%;
+    --secondary: 40 12% 91%;
+    --secondary-foreground: 36 10% 10%;
+    --muted: 40 12% 91%;
+    --muted-foreground: 30 6% 42%;
+    --accent: 163 20% 92%;
+    --accent-foreground: 163 33% 22%;
+    --destructive: 18 62% 44%;
+    --destructive-foreground: 45 29% 97%;
+    --border: 36 8% 84%;
+    --input: 36 8% 80%;
+    --ring: 163 33% 27%;
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
 }
 
 @media print {

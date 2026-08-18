@@ -38,6 +38,7 @@ import {
   Download,
   Mail,
   Trash2,
+  Search,
 } from "lucide-react"
 import {
   Dialog,
@@ -48,19 +49,21 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Separator } from "@/components/ui/separator"
 import { ToastAction } from "@/components/ui/toast"
 import { StatementView } from "@/components/statement-view"
 import { ProgramFilmPicker } from "@/components/program-film-picker"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/lib/supabase-client"
-import { normalizeProgramName, parseStatementCsv } from "@/lib/statements/csv"
+import { normalizeProgramName, parseStatementCsv, uniqueByNormalizedTitle } from "@/lib/statements/csv"
 import { deriveAssignmentStatus } from "@/lib/statements/assignment-status"
 import { formatPaymentMonthLabel } from "@/lib/statements/payment-month"
 import { rowEditFromMatch, resolveFilmIdForCsvProgram } from "@/lib/statements/program-match"
-import { splitProfileLabel } from "@/lib/statements/splits"
+import { splitProfileLabel, splitProfileShortLabel } from "@/lib/statements/splits"
 import { printStatement } from "@/lib/print-statement"
 import type { ProgramType, RowAssignmentStatus, SplitProfile } from "@/lib/statements/types"
 import { SPLIT_PROFILES } from "@/lib/statements/types"
+import { splitProfileForFilmName, findBseFilm } from "@/lib/statements/bse-film-catalog"
 
 const PLATFORM_OPTIONS = [
   "Tubi",
@@ -198,10 +201,67 @@ function toProgramSplitMatches(splits: ProgramSplit[]) {
   }))
 }
 
+type GroupedProgramDefault = {
+  key: string
+  title: string
+  aliases: string[]
+  split_profile: SplitProfile
+  program_type: ProgramType
+  season_name: string | null
+  episode_name: string | null
+}
+
+function groupProgramDefaults(
+  splits: ProgramSplit[],
+  filmTitleById: Map<string, string>
+): GroupedProgramDefault[] {
+  const groups = new Map<string, ProgramSplit[]>()
+  for (const split of splits) {
+    const key = split.film_id || normalizeProgramName(split.program_name)
+    const rows = groups.get(key) ?? []
+    rows.push(split)
+    groups.set(key, rows)
+  }
+
+  return [...groups.entries()]
+    .map(([key, rows]) => {
+      const filmTitle = rows[0].film_id ? filmTitleById.get(rows[0].film_id) : null
+      const title =
+        filmTitle ||
+        [...rows].sort((a, b) => b.program_name.length - a.program_name.length)[0].program_name
+      const titleKey = normalizeProgramName(title)
+      const aliases = [
+        ...new Set(
+          rows
+            .map((row) => row.program_name)
+            .filter((name) => normalizeProgramName(name) !== titleKey)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+
+      return {
+        key,
+        title,
+        aliases,
+        split_profile: rows[0].split_profile,
+        program_type: (rows[0].program_type as ProgramType) || "feature",
+        season_name: rows[0].season_name ?? null,
+        episode_name: rows[0].episode_name ?? null,
+      }
+    })
+    .sort((a, b) => a.title.localeCompare(b.title))
+}
+
 type FilmOption = {
   film_id: string
   title: string
   statement_contact_email: string | null
+  production_company_id: string | null
+}
+
+type ProductionCompanyOption = {
+  id: string
+  name: string
+  primary_contact_email: string | null
 }
 
 function formatMoney(n: number) {
@@ -316,6 +376,8 @@ function applyAutoMatchToEdits(
 
     if (!matchedFilmId) continue
 
+    const matchedTitle =
+      films.find((f) => f.film_id === matchedFilmId)?.title ?? row.program_name
     const matched = rowEditFromMatch(
       matchedFilmId,
       {
@@ -326,7 +388,8 @@ function applyAutoMatchToEdits(
         display_title_override:
           current?.displayTitleOverride ?? row.display_title_override,
       },
-      splitMatches
+      splitMatches,
+      matchedTitle
     )
     next[row.assignment_id] = {
       ...matched,
@@ -370,6 +433,7 @@ export default function StatementsPage() {
   const [rowAssignments, setRowAssignments] = useState<RowAssignment[]>([])
   const [rowEdits, setRowEdits] = useState<Record<string, RowEdit>>({})
   const [assignmentSearch, setAssignmentSearch] = useState("")
+  const [defaultsSearch, setDefaultsSearch] = useState("")
   const [assignmentPage, setAssignmentPage] = useState(0)
   const [isLoadingAssignments, setIsLoadingAssignments] = useState(false)
   const [isSavingAssignments, setIsSavingAssignments] = useState(false)
@@ -384,6 +448,16 @@ export default function StatementsPage() {
   const [isGenerating, setIsGenerating] = useState(false)
 
   const [films, setFilms] = useState<FilmOption[]>([])
+  const [companies, setCompanies] = useState<ProductionCompanyOption[]>([])
+  const [newCompanyName, setNewCompanyName] = useState("")
+  const [isCreatingCompany, setIsCreatingCompany] = useState(false)
+  const [savingCompanyForFilmId, setSavingCompanyForFilmId] = useState<string | null>(null)
+  const [assignAllCompanyId, setAssignAllCompanyId] = useState("")
+  const [isAssigningAllCompanies, setIsAssigningAllCompanies] = useState(false)
+  const filmsRef = useRef(films)
+  filmsRef.current = films
+  const programSplitsRef = useRef(programSplits)
+  programSplitsRef.current = programSplits
   const [deletingUploadId, setDeletingUploadId] = useState<string | null>(null)
 
   const [sendDialogOpen, setSendDialogOpen] = useState(false)
@@ -422,12 +496,157 @@ export default function StatementsPage() {
     setProgramSplits(json.splits ?? [])
   }, [])
 
+  const loadCompanies = useCallback(async () => {
+    const res = await fetch("/api/statements/production-companies")
+    if (!res.ok) return
+    const json = await res.json()
+    setCompanies(json.companies ?? [])
+  }, [])
+
   const loadFilms = useCallback(async () => {
     const res = await fetch("/api/statements/films")
     if (!res.ok) return
     const json = await res.json()
-    setFilms(json.films ?? [])
+    setFilms(uniqueByNormalizedTitle(json.films ?? []))
   }, [])
+
+  const handleCreateFilm = useCallback(
+    async (title: string) => {
+      const res = await fetch("/api/statements/films", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast({
+          variant: "destructive",
+          title: "Could not add program",
+          description: json.error || "Try again.",
+        })
+        throw new Error(json.error || "Could not add program to library.")
+      }
+      const film = json.film as FilmOption
+      setFilms((current) =>
+        uniqueByNormalizedTitle([...current, film]).sort((a, b) => a.title.localeCompare(b.title))
+      )
+      toast({
+        title: json.created ? "Program added to library" : "Program already in library",
+        description: film.title,
+      })
+      return film
+    },
+    [toast]
+  )
+
+  const handleCreateCompany = async () => {
+    const name = newCompanyName.trim()
+    if (!name) {
+      toast({
+        variant: "destructive",
+        title: "Company name required",
+        description: "Enter a production company name to add it.",
+      })
+      return
+    }
+    setIsCreatingCompany(true)
+    try {
+      const res = await fetch("/api/statements/production-companies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || "Could not create company.")
+      const company = json.company as ProductionCompanyOption
+      setCompanies((current) => {
+        if (current.some((c) => c.id === company.id)) return current
+        return [...current, company].sort((a, b) => a.name.localeCompare(b.name))
+      })
+      setNewCompanyName("")
+      setAssignAllCompanyId((current) => current || company.id)
+      toast({
+        title: json.created ? "Production company added" : "Company already exists",
+        description: company.name,
+      })
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: "Could not add company",
+        description: e instanceof Error ? e.message : "Unknown error",
+      })
+    } finally {
+      setIsCreatingCompany(false)
+    }
+  }
+
+  const handleAssignCompany = async (filmId: string, productionCompanyId: string) => {
+    setSavingCompanyForFilmId(filmId)
+    try {
+      const res = await fetch("/api/statements/films", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filmId, productionCompanyId }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || "Could not assign company.")
+      const film = json.film as FilmOption
+      setFilms((current) =>
+        current.map((item) => (item.film_id === film.film_id ? { ...item, ...film } : item))
+      )
+      if (generatePaymentMonth) await loadReadyQueue(generatePaymentMonth)
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: "Could not assign production company",
+        description: e instanceof Error ? e.message : "Unknown error",
+      })
+    } finally {
+      setSavingCompanyForFilmId(null)
+    }
+  }
+
+  const handleAssignCompanyToAll = async (productionCompanyId: string) => {
+    const filmIds = [
+      ...new Set(
+        rowAssignments
+          .map((row) => rowEdits[row.assignment_id]?.filmId || row.film_id)
+          .filter((id): id is string => Boolean(id))
+      ),
+    ]
+    if (!productionCompanyId || filmIds.length === 0) return
+    setIsAssigningAllCompanies(true)
+    try {
+      const filmsUpdated: FilmOption[] = []
+      for (const filmId of filmIds) {
+        const res = await fetch("/api/statements/films", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filmId, productionCompanyId }),
+        })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(json.error || "Could not assign company.")
+        filmsUpdated.push(json.film as FilmOption)
+      }
+      setFilms((current) => {
+        const byId = new Map(filmsUpdated.map((film) => [film.film_id, film]))
+        return current.map((item) => (byId.has(item.film_id) ? { ...item, ...byId.get(item.film_id)! } : item))
+      })
+      if (generatePaymentMonth) await loadReadyQueue(generatePaymentMonth)
+      toast({
+        title: "Production company saved",
+        description: `Assigned to ${filmIds.length} film${filmIds.length === 1 ? "" : "s"}. This is remembered for future uploads.`,
+      })
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: "Could not assign production company",
+        description: e instanceof Error ? e.message : "Unknown error",
+      })
+    } finally {
+      setIsAssigningAllCompanies(false)
+    }
+  }
 
   const loadRowAssignments = useCallback(
     async (uploadId: string): Promise<RowAssignment[]> => {
@@ -457,7 +676,22 @@ export default function StatementsPage() {
           }
         }
 
-        setRowEdits(applyAutoMatchToEdits(assignments, edits, films, programSplits))
+        setRowEdits((current) => {
+          const next = { ...edits }
+          for (const [id, edit] of Object.entries(current)) {
+            const incoming = next[id]
+            if (!incoming) continue
+            if (edit.filmId && !incoming.filmId) {
+              next[id] = { ...incoming, filmId: edit.filmId, splitProfile: edit.splitProfile }
+            }
+          }
+          return applyAutoMatchToEdits(
+            assignments,
+            next,
+            filmsRef.current,
+            programSplitsRef.current
+          )
+        })
         setAssignmentPage(0)
         return assignments
       } catch (e) {
@@ -471,18 +705,8 @@ export default function StatementsPage() {
         setIsLoadingAssignments(false)
       }
     },
-    [toast, films, programSplits]
+    [toast]
   )
-
-  const clearAssignSplitsSection = useCallback(() => {
-    setActiveUploadId(null)
-    setActiveUploadMeta(null)
-    setRowAssignments([])
-    setRowEdits({})
-    setAssignmentSearch("")
-    setAssignmentPage(0)
-    hadDirtyAssignmentsRef.current = false
-  }, [])
 
   const loadReadyQueue = useCallback(
     async (month: string) => {
@@ -495,8 +719,15 @@ export default function StatementsPage() {
         const res = await fetch(`/api/statements/ready-queue?paymentMonth=${month}`)
         const json = await res.json()
         if (!res.ok) throw new Error(json.error || "Failed to load queue")
-        setReadyQueue(json.companies ?? [])
-        setSelectedAssignmentIds([])
+        const companies = json.companies ?? []
+        setReadyQueue(companies)
+        setSelectedAssignmentIds(
+          companies.flatMap((company: ReadyQueueCompany) =>
+            company.items
+              .filter((item) => item.status === "ready")
+              .map((item) => item.assignment_id)
+          )
+        )
       } catch (e) {
         toast({
           variant: "destructive",
@@ -531,7 +762,8 @@ export default function StatementsPage() {
       }
       setIsAdmin(true)
       try {
-        await Promise.all([loadData(), loadSplits(), loadFilms()])
+        await loadFilms()
+        await Promise.all([loadData(), loadSplits(), loadCompanies()])
       } catch (e) {
         toast({
           variant: "destructive",
@@ -543,7 +775,7 @@ export default function StatementsPage() {
       }
     }
     init()
-  }, [router, loadData, loadSplits, loadFilms, toast])
+  }, [router, loadData, loadSplits, loadFilms, loadCompanies, toast])
 
   useEffect(() => {
     if (generatePaymentMonth) {
@@ -557,20 +789,64 @@ export default function StatementsPage() {
     if (activeUploadId) loadRowAssignments(activeUploadId)
   }, [activeUploadId, loadRowAssignments])
 
-  const libraryTitleKeys = useMemo(
-    () => new Set(films.map((f) => normalizeProgramName(f.title))),
-    [films]
-  )
+  const libraryTitleKeys = useMemo(() => {
+    const keys = new Set(films.map((f) => normalizeProgramName(f.title)))
+    for (const film of films) {
+      const catalog = findBseFilm(film.title)
+      if (!catalog) continue
+      keys.add(normalizeProgramName(catalog.title))
+      for (const alias of catalog.aliases) {
+        keys.add(normalizeProgramName(alias))
+      }
+    }
+    for (const split of programSplits) {
+      keys.add(split.program_name_normalized ?? normalizeProgramName(split.program_name))
+    }
+    return keys
+  }, [films, programSplits])
 
   const filmTitleById = useMemo(
     () => new Map(films.map((film) => [film.film_id, film.title])),
     [films]
   )
 
+  const filmsInUpload = useMemo(() => {
+    const ids = new Set<string>()
+    for (const row of rowAssignments) {
+      const filmId = rowEdits[row.assignment_id]?.filmId || row.film_id
+      if (filmId) ids.add(filmId)
+    }
+    return films
+      .filter((film) => ids.has(film.film_id))
+      .sort((a, b) => a.title.localeCompare(b.title))
+  }, [rowAssignments, rowEdits, films])
+
+  const unassignedCompanyCount = filmsInUpload.filter((film) => !film.production_company_id).length
+
   const programSplitByFilmId = useMemo(
     () => new Map(programSplits.filter((s) => s.film_id).map((s) => [s.film_id!, s])),
     [programSplits]
   )
+
+  const groupedProgramDefaults = useMemo(
+    () => groupProgramDefaults(programSplits, filmTitleById),
+    [programSplits, filmTitleById]
+  )
+
+  const filteredProgramDefaults = useMemo(() => {
+    const q = defaultsSearch.trim().toLowerCase()
+    const normalizedQuery = normalizeProgramName(defaultsSearch)
+    if (!q) return groupedProgramDefaults
+    return groupedProgramDefaults.filter((item) => {
+      const haystack = [item.title, ...item.aliases].join(" ")
+      return (
+        haystack.toLowerCase().includes(q) ||
+        (normalizedQuery !== "" && normalizeProgramName(haystack).includes(normalizedQuery))
+      )
+    })
+  }, [groupedProgramDefaults, defaultsSearch])
+
+  const defaultsHaveSeries = groupedProgramDefaults.some((item) => item.program_type === "series")
 
   const platformOptions = useMemo(() => {
     const known = new Set(PLATFORM_OPTIONS.map((name) => name.toLowerCase()))
@@ -656,12 +932,17 @@ export default function StatementsPage() {
       if (patch.filmId && patch.filmId !== base.filmId) {
         const saved = programSplitByFilmId.get(patch.filmId)
         const csvEpisode = row?.csv_episode?.trim()
+        const catalogSplit = splitProfileForFilmName(
+          filmTitleById.get(patch.filmId) ?? row?.program_name ?? ""
+        )
         if (saved) {
           next.splitProfile = saved.split_profile
           next.programType = csvEpisode ? "series" : saved.program_type || "feature"
           next.seasonName = saved.season_name || base.seasonName
           next.episodeName = csvEpisode || saved.episode_name || base.episodeName
           next.displayTitleOverride = saved.display_title_override ?? ""
+        } else if (catalogSplit && !next.splitProfile) {
+          next.splitProfile = catalogSplit
         }
       }
       if (patch.programType === "feature") {
@@ -849,31 +1130,16 @@ export default function StatementsPage() {
       const readySaved = Array.isArray(json.assignments)
         ? json.assignments.filter((a: { status?: string }) => a.status === "ready").length
         : 0
-      let assignments: RowAssignment[] = []
-      if (activeUploadId) {
-        assignments = await loadRowAssignments(activeUploadId)
-      }
+      if (activeUploadId) await loadRowAssignments(activeUploadId)
       if (generatePaymentMonth) await loadReadyQueue(generatePaymentMonth)
 
-      const allRowsComplete =
-        assignments.length > 0 &&
-        assignments.every((row) => row.status === "ready" || row.status === "statemented")
-
-      if (allRowsComplete) {
-        clearAssignSplitsSection()
-        toast({
-          title: "Assignments saved",
-          description: `${json.updated} row(s) saved · Continue to Generate draft statement below.`,
-        })
-      } else {
-        toast({
-          title: "Assignments saved",
-          description:
-            readySaved > 0
-              ? `${json.updated} row(s) saved · ${readySaved} ready for statement generation`
-              : `${json.updated} row(s) saved`,
-        })
-      }
+      toast({
+        title: "Assignments saved",
+        description:
+          readySaved > 0
+            ? `${json.updated} row(s) saved · ${readySaved} ready after a production company is assigned`
+            : `${json.updated} row(s) saved`,
+      })
     } catch (e) {
       toast({
         variant: "destructive",
@@ -1155,8 +1421,8 @@ export default function StatementsPage() {
 
   if (loading) {
     return (
-      <div className="flex min-h-[40vh] items-center justify-center text-ink/40">
-        <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+      <div className="flex min-h-[40vh] items-center justify-center text-muted-foreground">
+        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
         Loading statements…
       </div>
     )
@@ -1166,20 +1432,24 @@ export default function StatementsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-8 px-4 py-10 print:m-0 print:max-w-none print:space-y-0 print:px-0 print:py-0">
-      <div className="print:hidden">
-        <p className="text-xs font-semibold uppercase tracking-widest text-accent">Admin</p>
-        <h1 className="font-sans text-2xl font-bold text-ink md:text-3xl">Statement Generator</h1>
-        <p className="mt-2 max-w-2xl text-ink/60">
-          Upload finalized platform CSV reports, configure per-program revenue splits, and generate
-          draft statements for review and PDF export.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4 print:hidden">
+        <div className="space-y-2">
+          <Badge variant="outline" className="font-normal tracking-wider text-primary">
+            Admin
+          </Badge>
+          <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Statement Generator</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Upload finalized platform CSV reports, assign splits and a production company, then
+            generate draft statements for review and PDF export.
+          </p>
+        </div>
       </div>
 
-      <Alert className="border-accent/20 bg-accent/[0.06] print:hidden">
-        <AlertDescription className="text-ink/70">
+      <Alert className="border-primary/20 bg-accent-light print:hidden">
+        <AlertDescription>
           Statement CSV format: Program Name, Episode, Gross Earned, Impressions, ECPM. Upload one
-          platform CSV per payment month (many programs per file), assign splits per program row,
-          then select the statement period when generating.
+          platform CSV per payment month (many programs per file), assign splits, assign a production
+          company to each film, then select the statement period when generating.
         </AlertDescription>
       </Alert>
 
@@ -1194,18 +1464,23 @@ export default function StatementsPage() {
             <CardHeader>
               <CardTitle>Generator workflow</CardTitle>
               <CardDescription>
-                Upload a platform CSV, assign per-program splits, then generate draft statements
-                grouped by production company.
+                Upload a platform CSV, assign splits, assign a production company to each film, then
+                generate draft statements grouped by company.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-8">
               <section className="space-y-4">
-                <div>
-                  <h2 className="text-lg font-semibold text-ink">1. Upload platform CSV</h2>
-                  <p className="text-sm text-ink/60">
-                    Select the platform and its revenue period, then upload a CSV with all programs
-                    for that platform.
-                  </p>
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+                    1
+                  </span>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">Upload platform CSV</h2>
+                    <p className="text-sm text-muted-foreground">
+                      Select the platform and its revenue period, then upload a CSV with all programs
+                      for that platform.
+                    </p>
+                  </div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-4">
                   <div className="space-y-2">
@@ -1309,23 +1584,29 @@ export default function StatementsPage() {
                   Upload CSV
                 </Button>
                 {activeUploadMeta && (
-                  <div className="rounded-lg border border-accent/20 bg-accent/[0.06] p-3 text-sm text-ink/70">
-                    Active upload: <span className="text-ink">{activeUploadMeta.file_name}</span> ·{" "}
+                  <div className="rounded-md border border-primary/20 bg-accent-light p-3 text-sm text-muted-foreground">
+                    Active upload: <span className="font-medium text-foreground">{activeUploadMeta.file_name}</span> ·{" "}
                     {activeUploadMeta.platform} · {formatDate(activeUploadMeta.period_start)} –{" "}
                     {formatDate(activeUploadMeta.period_end)}
                   </div>
                 )}
               </section>
 
-              <section className="space-y-4 border-t border-ink/10 pt-6">
+              <Separator />
+
+              <section className="space-y-4">
                 <div className="flex flex-wrap items-end justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-semibold text-ink">2. Assign splits</h2>
-                    <p className="text-sm text-ink/60">
-                      Assign library program, Feature/Series, and split profile for each uploaded
-                      row. Use <span className="text-ink">Save default</span> to remember a program
-                      and split for future uploads.
-                    </p>
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+                      2
+                    </span>
+                    <div>
+                      <h2 className="text-base font-semibold tracking-tight">Assign splits</h2>
+                      <p className="text-sm text-muted-foreground">
+                        Assign library program, Feature/Series, and split profile for each uploaded
+                        row. Use Save default to remember a program and split for future uploads.
+                      </p>
+                    </div>
                   </div>
                   {rowAssignments.length > 0 && (
                     <Badge variant="secondary">
@@ -1440,8 +1721,10 @@ export default function StatementsPage() {
                                     <ProgramFilmPicker
                                       films={films}
                                       value={edit.filmId}
+                                      suggestedName={row.program_name}
                                       onValueChange={(id) => updateRowEdit(row.assignment_id, { filmId: id })}
-                                      placeholder="Search library…"
+                                      onCreateFilm={handleCreateFilm}
+                                      placeholder="Search or add…"
                                     />
                                   </TableCell>
                                   <TableCell>
@@ -1597,13 +1880,161 @@ export default function StatementsPage() {
                 )}
               </section>
 
-              <section className="space-y-4 border-t border-ink/10 pt-6">
-                <div>
-                  <h2 className="text-lg font-semibold text-ink">3. Generate draft statement</h2>
-                  <p className="text-sm text-ink/60">
-                    Select ready rows grouped by production company. Multiple programs can be
-                    included on one statement.
+              <Separator />
+
+              <section className="space-y-4">
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+                      3
+                    </span>
+                    <div>
+                      <h2 className="text-base font-semibold tracking-tight">Assign production company</h2>
+                      <p className="text-sm text-muted-foreground">
+                        Create a company if you do not have one on file, then assign it to each film.
+                        The assignment is saved on the film and reused on future uploads.
+                      </p>
+                    </div>
+                  </div>
+                  {filmsInUpload.length > 0 && (
+                    <Badge variant="secondary">
+                      {filmsInUpload.length - unassignedCompanyCount} of {filmsInUpload.length} assigned
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                  <div className="space-y-2 sm:max-w-sm sm:flex-1">
+                    <Label htmlFor="new-company-name">Add production company</Label>
+                    <Input
+                      id="new-company-name"
+                      value={newCompanyName}
+                      onChange={(e) => setNewCompanyName(e.target.value)}
+                      placeholder="e.g. BSE"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          void handleCreateCompany()
+                        }
+                      }}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleCreateCompany()}
+                    disabled={isCreatingCompany || !newCompanyName.trim()}
+                  >
+                    {isCreatingCompany ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Plus className="h-4 w-4" />
+                    )}
+                    Add company
+                  </Button>
+                </div>
+
+                {companies.length === 0 ? (
+                  <p className="text-sm text-ink/40">
+                    No production companies on file yet. Add one above, then assign it to each film.
                   </p>
+                ) : filmsInUpload.length > 1 ? (
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                    <div className="space-y-2 sm:max-w-sm sm:flex-1">
+                      <Label>Assign one company to all films in this upload</Label>
+                      <Select
+                        value={assignAllCompanyId || undefined}
+                        onValueChange={setAssignAllCompanyId}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select company" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {companies.map((company) => (
+                            <SelectItem key={company.id} value={company.id}>
+                              {company.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() => void handleAssignCompanyToAll(assignAllCompanyId)}
+                      disabled={!assignAllCompanyId || isAssigningAllCompanies}
+                    >
+                      {isAssigningAllCompanies ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : null}
+                      Assign to all films
+                    </Button>
+                  </div>
+                ) : null}
+
+                {!activeUploadId ? (
+                  <p className="text-sm text-ink/40">
+                    Upload a CSV and assign programs in Step 2 to see films here.
+                  </p>
+                ) : filmsInUpload.length === 0 ? (
+                  <p className="text-sm text-ink/40">
+                    Assign library programs in Step 2 first. Each unique film will appear here.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {filmsInUpload.map((film) => (
+                      <div
+                        key={film.film_id}
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink/10 bg-white p-3"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-medium text-ink">{film.title}</p>
+                          <p className="text-xs text-ink/40">
+                            {film.production_company_id
+                              ? "Saved on this film for future statements"
+                              : "No production company assigned yet"}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {savingCompanyForFilmId === film.film_id ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-ink/40" />
+                          ) : null}
+                          <Select
+                            value={film.production_company_id ?? undefined}
+                            onValueChange={(companyId) => void handleAssignCompany(film.film_id, companyId)}
+                            disabled={companies.length === 0 || savingCompanyForFilmId === film.film_id}
+                          >
+                            <SelectTrigger className="w-[220px]">
+                              <SelectValue placeholder="Select company" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {companies.map((company) => (
+                                <SelectItem key={company.id} value={company.id}>
+                                  {company.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <Separator />
+
+              <section className="space-y-4">
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+                    4
+                  </span>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">Generate draft statement</h2>
+                    <p className="text-sm text-muted-foreground">
+                      Select ready rows grouped by production company. Multiple programs can be
+                      included on one statement.
+                    </p>
+                  </div>
                 </div>
                 <div className="max-w-xs">
                   <div className="space-y-2">
@@ -1623,7 +2054,9 @@ export default function StatementsPage() {
                 ) : !generatePaymentMonth ? (
                   <p className="text-sm text-ink/40">Select a payment month to view the queue.</p>
                 ) : readyQueue.length === 0 ? (
-                  <p className="text-sm text-ink/40">No rows are ready for statement generation yet.</p>
+                  <p className="text-sm text-ink/40">
+                    No rows are ready yet. Assign splits in Step 2 and a production company in Step 3.
+                  </p>
                 ) : (
                   <div className="space-y-4">
                     {readyQueue.map((company) => {
@@ -1784,47 +2217,72 @@ export default function StatementsPage() {
             </Card>
 
             <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Saved program defaults</CardTitle>
-                <CardDescription>
-                  Opt-in defaults saved from Assign splits. Auto-matches library programs on future
-                  uploads and fills their saved splits.
-                </CardDescription>
+              <CardHeader className="gap-3 space-y-0 sm:flex-row sm:items-start sm:justify-between">
+                <div className="space-y-1.5">
+                  <CardTitle className="text-lg">Saved program defaults</CardTitle>
+                  <CardDescription>
+                    {groupedProgramDefaults.length} title
+                    {groupedProgramDefaults.length === 1 ? "" : "s"} auto-match on future uploads.
+                    Aliases like DIL and TTD are grouped under the library title.
+                  </CardDescription>
+                </div>
+                {programSplits.length > 0 ? (
+                  <div className="relative w-full sm:max-w-xs">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink/40" />
+                    <Input
+                      value={defaultsSearch}
+                      onChange={(e) => setDefaultsSearch(e.target.value)}
+                      placeholder="Search titles…"
+                      aria-label="Search saved program defaults"
+                      className="h-9 pl-8"
+                    />
+                  </div>
+                ) : null}
               </CardHeader>
               <CardContent>
                 {programSplits.length === 0 ? (
                   <p className="text-sm text-ink/40">No saved program defaults yet.</p>
+                ) : filteredProgramDefaults.length === 0 ? (
+                  <p className="text-sm text-ink/40">
+                    No titles match “{defaultsSearch.trim()}”.
+                  </p>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Program</TableHead>
-                        <TableHead>Type</TableHead>
-                        <TableHead>Profile</TableHead>
-                        <TableHead>Season</TableHead>
-                        <TableHead>Episode</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {programSplits.map((s) => (
-                        <TableRow key={s.program_split_id}>
-                          <TableCell className="text-ink">{s.program_name}</TableCell>
-                          <TableCell className="capitalize text-ink/70">
-                            {s.program_type || "feature"}
-                          </TableCell>
-                          <TableCell className="text-sm text-ink/70">
-                            {splitProfileLabel(s.split_profile)}
-                          </TableCell>
-                          <TableCell className="text-ink/40">
-                            {s.program_type === "series" ? s.season_name || "—" : "—"}
-                          </TableCell>
-                          <TableCell className="text-ink/40">
-                            {s.program_type === "series" ? s.episode_name || "—" : "—"}
-                          </TableCell>
+                  <div className="max-h-[28rem] overflow-auto rounded-md border border-ink/10">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Program</TableHead>
+                          <TableHead className="w-24">Split</TableHead>
+                          {defaultsHaveSeries ? <TableHead className="w-28">Episode</TableHead> : null}
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {filteredProgramDefaults.map((item) => (
+                          <TableRow key={item.key}>
+                            <TableCell className="py-2">
+                              <div className="font-medium text-ink">{item.title}</div>
+                              {item.aliases.length > 0 ? (
+                                <div className="mt-0.5 text-xs text-ink/45">
+                                  Also {item.aliases.join(", ")}
+                                </div>
+                              ) : null}
+                            </TableCell>
+                            <TableCell className="py-2 tabular-nums text-ink">
+                              {splitProfileShortLabel(item.split_profile)}
+                            </TableCell>
+                            {defaultsHaveSeries ? (
+                              <TableCell className="py-2 text-ink/60">
+                                {item.program_type === "series"
+                                  ? [item.season_name, item.episode_name].filter(Boolean).join(" · ") ||
+                                    "Series"
+                                  : "—"}
+                              </TableCell>
+                            ) : null}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
                 )}
               </CardContent>
             </Card>

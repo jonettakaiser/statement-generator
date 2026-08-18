@@ -42,23 +42,29 @@ export async function POST(req: NextRequest) {
   if (rowsError) return NextResponse.json({ error: rowsError.message }, { status: 500 })
 
   const typedRows = (rows ?? []) as unknown as RowForGenerate[]
-  const eligible = typedRows.filter((r) => r.status === "ready" && r.films?.production_company_id)
+  const eligible = typedRows.filter(
+    (r) => r.status === "ready" && (r.films?.production_companies?.id || r.films?.production_company_id)
+  )
 
   if (eligible.length === 0) {
-    return NextResponse.json({ error: "None of the selected rows are ready." }, { status: 400 })
+    return NextResponse.json(
+      { error: "None of the selected rows have a production company assigned." },
+      { status: 400 }
+    )
   }
 
   const warnings: string[] = []
   const skipped = assignmentIds.length - eligible.length
   if (skipped > 0) {
-    warnings.push(`${skipped} selected row(s) were no longer ready and were skipped.`)
+    warnings.push(`${skipped} selected row(s) were skipped because they are not ready or have no production company.`)
   }
 
   const byCompany = new Map<string, { name: string; rows: RowForGenerate[] }>()
   for (const row of eligible) {
-    const company = row.films!.production_companies!
-    if (!byCompany.has(company.id)) byCompany.set(company.id, { name: company.name, rows: [] })
-    byCompany.get(company.id)!.rows.push(row)
+    const companyId = row.films?.production_companies?.id ?? row.films!.production_company_id!
+    const companyName = row.films?.production_companies?.name ?? "Production company"
+    if (!byCompany.has(companyId)) byCompany.set(companyId, { name: companyName, rows: [] })
+    byCompany.get(companyId)!.rows.push(row)
   }
 
   let lastStatementId: string | null = null

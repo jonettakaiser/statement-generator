@@ -15,6 +15,18 @@ export function normalizeProgramName(name: string): string {
     .trim()
 }
 
+export function uniqueByNormalizedTitle<T extends { title: string }>(items: T[]): T[] {
+  const seen = new Set<string>()
+  const unique: T[] = []
+  for (const item of items) {
+    const key = normalizeProgramName(item.title)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    unique.push(item)
+  }
+  return unique
+}
+
 function parseCsvLines(text: string): string[][] {
   const rows: string[][] = []
   let field = ""

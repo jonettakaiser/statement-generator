@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createSupabaseAdminClient, requireAdmin } from "@/lib/supabase-server"
 import { splitProfileClientShare, splitProfileLabel } from "@/lib/statements/splits"
+import { ensureBseFilmLibrary } from "@/lib/statements/seed-bse-library"
 import type { SplitProfile } from "@/lib/statements/types"
 
 type RowWithFilm = {
@@ -31,6 +32,14 @@ export async function GET(req: NextRequest) {
   if (!paymentMonth) return NextResponse.json({ error: "paymentMonth is required" }, { status: 400 })
 
   const admin = createSupabaseAdminClient()
+  try {
+    await ensureBseFilmLibrary(admin)
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Failed to prepare film library." },
+      { status: 500 }
+    )
+  }
 
   const { data: statementedForMonth } = await admin
     .from("statements")

@@ -9,6 +9,7 @@ export const SPLIT_PROFILES = [
   "client-60",
   "client-70",
   "client-80",
+  "client-85",
   "client-90",
 ] as const
 
@@ -19,5 +20,6 @@ export const SPLIT_PROFILE_CLIENT_SHARE: Record<SplitProfile, number> = {
   "client-60": 0.6,
   "client-70": 0.7,
   "client-80": 0.8,
+  "client-85": 0.85,
   "client-90": 0.9,
 }
