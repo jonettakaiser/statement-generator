@@ -27,6 +27,10 @@ create table if not exists films (
   created_at timestamptz not null default now()
 );
 
+-- Prevents the library seed from inserting the same title twice.
+create unique index if not exists films_title_normalized_unique
+  on films (lower(trim(title)));
+
 create table if not exists program_splits (
   program_split_id uuid primary key default gen_random_uuid(),
   program_name text not null,
